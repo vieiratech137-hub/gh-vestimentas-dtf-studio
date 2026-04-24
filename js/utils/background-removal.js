@@ -56,6 +56,23 @@ function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
 }
 
+function hexToRgb(hex) {
+  const normalized = hex.replace("#", "");
+  const value =
+    normalized.length === 3
+      ? normalized
+          .split("")
+          .map((part) => `${part}${part}`)
+          .join("")
+      : normalized;
+
+  return [
+    Number.parseInt(value.slice(0, 2), 16),
+    Number.parseInt(value.slice(2, 4), 16),
+    Number.parseInt(value.slice(4, 6), 16)
+  ];
+}
+
 function resolveApi(module) {
   const removeBackground =
     typeof module.removeBackground === "function"
@@ -158,12 +175,14 @@ function sampleBorderStats(imageData) {
   };
 }
 
-function buildBackgroundMask(imageData, stats) {
+function buildBackgroundMask(imageData, stats, options = {}) {
   const { data, width, height } = imageData;
   const totalPixels = width * height;
   const visited = new Uint8Array(totalPixels);
   const background = new Uint8Array(totalPixels);
   const queue = new Uint32Array(totalPixels);
+  const minRemovedRatio = options.minRemovedRatio ?? 0.08;
+  const maxRemovedRatio = options.maxRemovedRatio ?? 0.88;
   let head = 0;
   let tail = 0;
 
@@ -223,7 +242,7 @@ function buildBackgroundMask(imageData, stats) {
   const removedPixels = background.reduce((total, value) => total + value, 0);
   const removedRatio = removedPixels / totalPixels;
 
-  if (removedRatio < 0.08 || removedRatio > 0.88) {
+  if (removedRatio < minRemovedRatio || removedRatio > maxRemovedRatio) {
     return null;
   }
 
@@ -239,6 +258,50 @@ function buildBackgroundMask(imageData, stats) {
   }
 
   return maskImageData;
+}
+
+async function applyScaledMaskToSourceImage(sourceImage, maskImageData, onProgress) {
+  onProgress?.({
+    key: "mask:scale",
+    current: 2,
+    total: 3,
+    percent: 58
+  });
+
+  const width = sourceImage.naturalWidth || sourceImage.width;
+  const height = sourceImage.naturalHeight || sourceImage.height;
+
+  const maskCanvas = createCanvas(maskImageData.width, maskImageData.height);
+  maskCanvas.getContext("2d").putImageData(maskImageData, 0, 0);
+
+  const resultCanvas = createCanvas(width, height);
+  const resultContext = resultCanvas.getContext("2d", { willReadFrequently: true });
+  resultContext.drawImage(sourceImage, 0, 0, width, height);
+
+  const fullMaskCanvas = createCanvas(width, height);
+  const fullMaskContext = fullMaskCanvas.getContext("2d", { willReadFrequently: true });
+  fullMaskContext.imageSmoothingEnabled = true;
+  fullMaskContext.drawImage(maskCanvas, 0, 0, width, height);
+
+  const resultImageData = resultContext.getImageData(0, 0, width, height);
+  const fullMaskData = fullMaskContext.getImageData(0, 0, width, height).data;
+
+  for (let offset = 0; offset < resultImageData.data.length; offset += 4) {
+    resultImageData.data[offset + 3] = Math.round(
+      (resultImageData.data[offset + 3] * fullMaskData[offset + 3]) / 255
+    );
+  }
+
+  resultContext.putImageData(resultImageData, 0, 0);
+
+  onProgress?.({
+    key: "mask:done",
+    current: 3,
+    total: 3,
+    percent: 100
+  });
+
+  return canvasToBlob(resultCanvas, "image/png");
 }
 
 async function trySolidBackgroundRemoval(source, onProgress) {
@@ -276,51 +339,156 @@ async function trySolidBackgroundRemoval(source, onProgress) {
       return null;
     }
 
-    onProgress?.({
-      key: "fast:mask",
-      current: 2,
-      total: 3,
-      percent: 48
-    });
-
-    const maskCanvas = createCanvas(maskImageData.width, maskImageData.height);
-    maskCanvas.getContext("2d").putImageData(maskImageData, 0, 0);
-
-    const resultCanvas = createCanvas(width, height);
-    const resultContext = resultCanvas.getContext("2d", { willReadFrequently: true });
-    resultContext.drawImage(image, 0, 0, width, height);
-
-    const fullMaskCanvas = createCanvas(width, height);
-    const fullMaskContext = fullMaskCanvas.getContext("2d", { willReadFrequently: true });
-    fullMaskContext.imageSmoothingEnabled = true;
-    fullMaskContext.drawImage(maskCanvas, 0, 0, width, height);
-
-    const resultImageData = resultContext.getImageData(0, 0, width, height);
-    const fullMaskData = fullMaskContext.getImageData(0, 0, width, height).data;
-
-    for (let offset = 0; offset < resultImageData.data.length; offset += 4) {
-      resultImageData.data[offset + 3] = Math.round(
-        (resultImageData.data[offset + 3] * fullMaskData[offset + 3]) / 255
-      );
-    }
-
-    resultContext.putImageData(resultImageData, 0, 0);
-
-    onProgress?.({
-      key: "fast:apply",
-      current: 3,
-      total: 3,
-      percent: 100
-    });
-
-    const blob = await canvasToBlob(resultCanvas, "image/png");
+    const blob = await applyScaledMaskToSourceImage(image, maskImageData, onProgress);
 
     return {
       blob,
       meta: {
         runtimeLabel: "Instantaneo",
         strategy: "solid-background",
-        summary: "Instantaneo • recorte rapido por fundo solido detectado nas bordas."
+        summary: "Instantaneo - recorte rapido por fundo solido detectado nas bordas."
+      }
+    };
+  } finally {
+    revokeIfObjectUrl(image.dataset.temporaryUrl);
+  }
+}
+
+function estimateSelectedTolerance(imageData, selectedRgb) {
+  const { data, width, height } = imageData;
+  const distances = [];
+  const stepX = Math.max(1, Math.floor(width / 70));
+  const stepY = Math.max(1, Math.floor(height / 70));
+
+  for (let x = 0; x < width; x += stepX) {
+    const top = readPixel(data, x);
+    const bottom = readPixel(data, (height - 1) * width + x);
+    if (top[3] > 10) {
+      distances.push(colorDistance(top, selectedRgb));
+    }
+    if (bottom[3] > 10) {
+      distances.push(colorDistance(bottom, selectedRgb));
+    }
+  }
+
+  for (let y = 0; y < height; y += stepY) {
+    const left = readPixel(data, y * width);
+    const right = readPixel(data, y * width + (width - 1));
+    if (left[3] > 10) {
+      distances.push(colorDistance(left, selectedRgb));
+    }
+    if (right[3] > 10) {
+      distances.push(colorDistance(right, selectedRgb));
+    }
+  }
+
+  const closeMatches = distances.filter((value) => value <= 70);
+  if (!closeMatches.length) {
+    return 42;
+  }
+
+  const average = closeMatches.reduce((total, value) => total + value, 0) / closeMatches.length;
+  return clamp(Math.round(average * 2.3 + 18), 24, 58);
+}
+
+async function removeSelectedBackgroundColor(source, selectedHex, onProgress) {
+  const image = await loadImageFromSource(source);
+
+  try {
+    const width = image.naturalWidth || image.width;
+    const height = image.naturalHeight || image.height;
+    const analysisScale = Math.min(1, BORDER_ANALYSIS_SIDE / Math.max(width, height));
+    const analysisCanvas = createCanvas(width * analysisScale, height * analysisScale);
+    const analysisContext = analysisCanvas.getContext("2d", { willReadFrequently: true });
+    analysisContext.drawImage(image, 0, 0, analysisCanvas.width, analysisCanvas.height);
+
+    onProgress?.({
+      key: "selected:analyze",
+      current: 1,
+      total: 3,
+      percent: 16
+    });
+
+    const analysisImageData = analysisContext.getImageData(
+      0,
+      0,
+      analysisCanvas.width,
+      analysisCanvas.height
+    );
+    const selectedRgb = hexToRgb(selectedHex);
+    const selectedTolerance = estimateSelectedTolerance(analysisImageData, selectedRgb);
+    const maskImageData = buildBackgroundMask(
+      analysisImageData,
+      {
+        backgroundColor: selectedRgb,
+        tolerance: selectedTolerance
+      },
+      {
+        minRemovedRatio: 0.003,
+        maxRemovedRatio: 0.97
+      }
+    );
+
+    if (maskImageData) {
+      const blob = await applyScaledMaskToSourceImage(image, maskImageData, onProgress);
+      return {
+        blob,
+        meta: {
+          runtimeLabel: "Direto",
+          strategy: "selected-border-color",
+          summary: `Direto - cor ${selectedHex} removida a partir do fundo selecionado.`
+        }
+      };
+    }
+
+    onProgress?.({
+      key: "selected:global",
+      current: 2,
+      total: 3,
+      percent: 58
+    });
+
+    const resultCanvas = createCanvas(width, height);
+    const resultContext = resultCanvas.getContext("2d", { willReadFrequently: true });
+    resultContext.drawImage(image, 0, 0, width, height);
+    const resultImageData = resultContext.getImageData(0, 0, width, height);
+    const featherTolerance = selectedTolerance + 18;
+
+    for (let offset = 0; offset < resultImageData.data.length; offset += 4) {
+      const pixel = [
+        resultImageData.data[offset],
+        resultImageData.data[offset + 1],
+        resultImageData.data[offset + 2]
+      ];
+      const distance = colorDistance(pixel, selectedRgb);
+
+      if (distance <= selectedTolerance) {
+        resultImageData.data[offset + 3] = 0;
+        continue;
+      }
+
+      if (distance <= featherTolerance) {
+        const factor = (distance - selectedTolerance) / (featherTolerance - selectedTolerance);
+        resultImageData.data[offset + 3] = Math.round(resultImageData.data[offset + 3] * factor);
+      }
+    }
+
+    resultContext.putImageData(resultImageData, 0, 0);
+
+    onProgress?.({
+      key: "selected:done",
+      current: 3,
+      total: 3,
+      percent: 100
+    });
+
+    const blob = await canvasToBlob(resultCanvas, "image/png");
+    return {
+      blob,
+      meta: {
+        runtimeLabel: "Direto",
+        strategy: "selected-global-color",
+        summary: `Direto - cor ${selectedHex} removida pela selecao escolhida.`
       }
     };
   } finally {
@@ -362,7 +530,12 @@ async function createFastModeInput(source) {
 }
 
 export async function removeBackgroundLocally(source, onProgress, options = {}) {
+  const selectedBackgroundHex = options.selectedBackgroundHex?.trim();
   const fastModeEnabled = options.fastMode !== false;
+
+  if (selectedBackgroundHex) {
+    return removeSelectedBackgroundColor(source, selectedBackgroundHex, onProgress);
+  }
 
   if (fastModeEnabled) {
     const solidBackgroundResult = await trySolidBackgroundRemoval(source, onProgress);
@@ -416,7 +589,7 @@ export async function removeBackgroundLocally(source, onProgress, options = {}) 
         meta: {
           runtimeLabel: runtime.label,
           strategy: preparedInput.strategy,
-          summary: `${runtime.label} • ${preparedInput.summary}`
+          summary: `${runtime.label} - ${preparedInput.summary}`
         }
       };
     }
@@ -432,7 +605,7 @@ export async function removeBackgroundLocally(source, onProgress, options = {}) 
     meta: {
       runtimeLabel: runtime.label,
       strategy: "full-resolution",
-      summary: `${runtime.label} • Resolucao original mantida.`
+      summary: `${runtime.label} - Resolucao original mantida.`
     }
   };
 }

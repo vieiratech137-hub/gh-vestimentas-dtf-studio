@@ -1,12 +1,12 @@
-import JSZip from "https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm";
 import {
   removeBackgroundLocally,
   getBackgroundRemovalRuntime
 } from "../utils/background-removal.js";
+import { detectDominantColors } from "../utils/colors.js";
 import { createElement, clearChildren, setFeedback } from "../utils/dom.js";
 import { bindDropzone } from "../utils/upload-zone.js";
 import { downloadBlob, formatBytes } from "../utils/download.js";
-import { getBaseName, revokeIfObjectUrl } from "../utils/files.js";
+import { getBaseName, revokeIfObjectUrl, loadImageFromSource } from "../utils/files.js";
 
 export function initBatchRemoval() {
   const uploadInput = document.getElementById("batch-upload");
@@ -32,7 +32,7 @@ export function initBatchRemoval() {
   });
 
   runButton.addEventListener("click", runBatchRemoval);
-  downloadButton.addEventListener("click", downloadZip);
+  downloadButton.addEventListener("click", downloadAllPngs);
 
   grid.addEventListener("click", (event) => {
     const trigger = event.target.closest("[data-batch-action]");
@@ -46,8 +46,8 @@ export function initBatchRemoval() {
     }
 
     if (trigger.dataset.batchAction === "remove") {
+      cleanupProcessedResult(item);
       revokeIfObjectUrl(item.originalUrl);
-      revokeIfObjectUrl(item.processedUrl);
       state.items = state.items.filter((entry) => entry.id !== item.id);
       render();
       syncButtons();
@@ -55,32 +55,72 @@ export function initBatchRemoval() {
       if (!state.items.length) {
         setFeedback(status, "Adicione as imagens para montar a fila de processamento.");
       }
+      return;
+    }
+
+    if (trigger.dataset.batchAction === "select-color") {
+      const nextHex =
+        item.selectedBackgroundHex === trigger.dataset.colorHex ? "" : trigger.dataset.colorHex;
+      item.selectedBackgroundHex = nextHex;
+      cleanupProcessedResult(item);
+      item.status = "pending";
+      item.progress = 0;
+      item.error = "";
+      item.processedSummary = nextHex
+        ? `Cor de fundo escolhida: ${nextHex}. Clique em remover fundo para aplicar.`
+        : "";
+      render();
+      syncButtons();
     }
   });
+
+  function cleanupProcessedResult(item) {
+    revokeIfObjectUrl(item.processedUrl);
+    item.processedUrl = "";
+    item.processedBlob = null;
+  }
 
   function addFiles(files) {
     files.forEach((file) => {
       const id = `batch-${state.counter++}`;
-      state.items.push({
+      const item = {
         id,
         file,
         originalUrl: URL.createObjectURL(file),
         processedUrl: "",
         processedBlob: null,
         processedSummary: "",
+        palette: [],
+        paletteLoading: true,
+        selectedBackgroundHex: "",
         status: "pending",
         progress: 0,
         error: ""
-      });
+      };
+
+      state.items.push(item);
+      analyzePalette(item);
     });
 
     setFeedback(
       status,
-      `${state.items.length} arquivo(s) na fila. Clique em "Remover fundo em lote" para começar.`,
+      `${state.items.length} arquivo(s) na fila. Se quiser, marque a cor de fundo de cada imagem antes de processar.`,
       "neutral"
     );
     render();
     syncButtons();
+  }
+
+  async function analyzePalette(item) {
+    try {
+      const image = await loadImageFromSource(item.originalUrl);
+      item.palette = detectDominantColors(image, 6);
+    } catch (error) {
+      item.palette = [];
+    } finally {
+      item.paletteLoading = false;
+      scheduleRender();
+    }
   }
 
   function scheduleRender() {
@@ -97,6 +137,69 @@ export function initBatchRemoval() {
   function syncButtons() {
     runButton.disabled = !state.items.length || state.processing;
     downloadButton.disabled = !state.items.some((item) => item.processedBlob) || state.processing;
+  }
+
+  function createPaletteSection(item) {
+    const wrap = createElement("div", { className: "batch-palette" });
+    const head = createElement("div", { className: "batch-palette__head" });
+    const title = createElement("strong", { text: "Cor para remover" });
+    const hint = createElement("span", {
+      text: item.selectedBackgroundHex || "Nenhuma selecionada"
+    });
+    head.append(title, hint);
+
+    const swatches = createElement("div", { className: "batch-palette__swatches" });
+
+    if (item.paletteLoading) {
+      swatches.append(
+        createElement("span", {
+          className: "batch-palette__caption",
+          text: "Detectando cores..."
+        })
+      );
+      wrap.append(head, swatches);
+      return wrap;
+    }
+
+    if (!item.palette.length) {
+      swatches.append(
+        createElement("span", {
+          className: "batch-palette__caption",
+          text: "Nao foi possivel detectar as cores principais."
+        })
+      );
+      wrap.append(head, swatches);
+      return wrap;
+    }
+
+    item.palette.forEach((color) => {
+      const isSelected = item.selectedBackgroundHex === color.hex;
+      const button = createElement("button", {
+        className: `batch-color-chip ${isSelected ? "is-selected" : ""}`.trim(),
+        attrs: {
+          type: "button",
+          title: `Usar ${color.hex} como fundo`
+        },
+        dataset: {
+          batchAction: "select-color",
+          batchId: item.id,
+          colorHex: color.hex
+        }
+      });
+
+      const swatch = createElement("span", { className: "batch-color-chip__swatch" });
+      swatch.style.background = color.hex;
+      const code = createElement("span", {
+        className: "batch-color-chip__code",
+        text: color.hex
+      });
+
+      button.append(swatch, code);
+      swatches.append(button);
+    });
+
+    wrap.append(head, swatches);
+    return wrap;
   }
 
   function render() {
@@ -183,7 +286,7 @@ export function initBatchRemoval() {
       meta.append(size, pill);
       actions.append(downloadLink, removeButton);
       thumb.append(image);
-      body.append(title, meta, progress, detail, actions);
+      body.append(title, meta, createPaletteSection(item), progress, detail, actions);
       card.append(thumb, body);
       grid.append(card);
     });
@@ -199,12 +302,15 @@ export function initBatchRemoval() {
 
     const runtime = await getBackgroundRemovalRuntime();
     const fastModeEnabled = fastModeCheckbox.checked;
+    const hasColorSelections = state.items.some((item) => item.selectedBackgroundHex);
 
     setFeedback(
       status,
-      fastModeEnabled
-        ? `Modo rápido ativo em ${runtime.label}. O primeiro arquivo ainda pode baixar o modelo local, mas sem o preload pesado de antes.`
-        : `Processamento em ${runtime.label} com resolução original. O primeiro arquivo ainda pode baixar o modelo local.`,
+      hasColorSelections
+        ? "As imagens com cor marcada vao remover apenas essa cor do fundo. As demais seguem no modo automatico."
+        : fastModeEnabled
+          ? `Modo rapido ativo em ${runtime.label}. Sem cor marcada, o app usa deteccao automatica.`
+          : `Processamento em ${runtime.label} com resolucao original. Sem cor marcada, o app usa deteccao automatica.`,
       "warning"
     );
 
@@ -215,7 +321,9 @@ export function initBatchRemoval() {
       item.status = "working";
       item.progress = 8;
       item.error = "";
-      item.processedSummary = "";
+      if (!item.selectedBackgroundHex) {
+        item.processedSummary = "";
+      }
       scheduleRender();
 
       try {
@@ -226,7 +334,8 @@ export function initBatchRemoval() {
             scheduleRender();
           },
           {
-            fastMode: fastModeEnabled
+            fastMode: fastModeEnabled,
+            selectedBackgroundHex: item.selectedBackgroundHex || ""
           }
         );
 
@@ -239,7 +348,7 @@ export function initBatchRemoval() {
 
         setFeedback(
           status,
-          `Processando imagens: ${completed}/${queue.length} concluída(s).`,
+          `Processando imagens: ${completed}/${queue.length} concluida(s).`,
           "success"
         );
       } catch (error) {
@@ -263,33 +372,33 @@ export function initBatchRemoval() {
     if (readyCount) {
       setFeedback(
         status,
-        `${readyCount} imagem(ns) com fundo removido. Você já pode baixar tudo em ZIP.`,
+        `${readyCount} imagem(ns) com fundo removido. Voce ja pode baixar os PNGs individualmente.`,
         "success"
       );
     }
   }
 
-  async function downloadZip() {
+  async function downloadAllPngs() {
     const readyItems = state.items.filter((item) => item.processedBlob);
     if (!readyItems.length) {
       return;
     }
 
     downloadButton.disabled = true;
-    setFeedback(status, "Compactando PNGs transparentes em um arquivo ZIP...");
+    setFeedback(status, "Iniciando o download individual dos PNGs transparentes...");
 
     try {
-      const zip = new JSZip();
-
-      readyItems.forEach((item) => {
-        zip.file(`${getBaseName(item.file.name)}-transparent.png`, item.processedBlob);
-      });
-
-      const archive = await zip.generateAsync({ type: "blob" });
-      downloadBlob(archive, "dtf-fundos-transparentes.zip");
-      setFeedback(status, "ZIP pronto. O download foi iniciado.", "success");
+      for (const [index, item] of readyItems.entries()) {
+        downloadBlob(item.processedBlob, `${getBaseName(item.file.name)}-transparent.png`);
+        setFeedback(
+          status,
+          `Baixando arquivos: ${index + 1}/${readyItems.length}.`,
+          "success"
+        );
+        await new Promise((resolve) => window.setTimeout(resolve, 180));
+      }
     } catch (error) {
-      setFeedback(status, `Falha ao gerar o ZIP: ${error.message}`, "error");
+      setFeedback(status, `Falha ao baixar os arquivos: ${error.message}`, "error");
     } finally {
       syncButtons();
     }

@@ -406,6 +406,68 @@ canvas {
   padding: 14px;
 }
 
+.batch-palette {
+  display: grid;
+  gap: 8px;
+}
+
+.batch-palette__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.batch-palette__head strong,
+.batch-palette__caption,
+.batch-palette__head span {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.batch-palette__swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.batch-color-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.78);
+  cursor: pointer;
+  transition:
+    transform 160ms ease,
+    border-color 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.batch-color-chip:hover,
+.batch-color-chip:focus-visible,
+.batch-color-chip.is-selected {
+  transform: translateY(-1px);
+  border-color: rgba(239, 107, 66, 0.45);
+  box-shadow: 0 8px 16px rgba(239, 107, 66, 0.12);
+  outline: none;
+}
+
+.batch-color-chip__swatch {
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+}
+
+.batch-color-chip__code {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--text);
+}
+
 .preview-card__title {
   font-size: 0.94rem;
   line-height: 1.4;
