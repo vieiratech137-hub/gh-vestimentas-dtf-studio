@@ -389,6 +389,11 @@ canvas {
   background: rgba(255, 255, 255, 0.76);
 }
 
+.preview-card.is-shared {
+  border-color: rgba(15, 118, 110, 0.28);
+  box-shadow: 0 14px 28px rgba(15, 118, 110, 0.12);
+}
+
 .preview-card__thumb {
   min-height: 170px;
   padding: 14px;
@@ -525,7 +530,8 @@ canvas {
 
 .preview-card__actions {
   display: flex;
-  justify-content: space-between;
+  flex-wrap: wrap;
+  justify-content: flex-start;
   align-items: center;
   gap: 10px;
 }
@@ -541,6 +547,11 @@ canvas {
   background: transparent;
   color: var(--muted);
   cursor: pointer;
+}
+
+.inline-btn.is-active {
+  color: var(--accent-alt);
+  font-weight: 600;
 }
 
 .checkerboard {
@@ -707,6 +718,7 @@ canvas {
 .top-ruler,
 .side-ruler {
   position: relative;
+  overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 16px;
   background:
@@ -732,23 +744,65 @@ canvas {
     rgba(255, 255, 255, 0.76);
 }
 
-.top-ruler span,
-.side-ruler span {
+.ruler-marker {
   position: absolute;
   color: var(--muted);
   font-family: var(--font-mono);
   font-size: 0.7rem;
+  white-space: nowrap;
 }
 
-.top-ruler span {
+.ruler-marker::after {
+  content: "";
+  position: absolute;
+  background: rgba(29, 21, 15, 0.18);
+}
+
+.top-ruler .ruler-marker {
   top: 50%;
   transform: translate(-50%, -50%);
 }
 
-.side-ruler span {
+.top-ruler .ruler-marker::after {
+  left: 50%;
+  bottom: -14px;
+  width: 1px;
+  height: 10px;
+  transform: translateX(-50%);
+}
+
+.top-ruler .ruler-marker.is-start {
+  left: 10px !important;
+  transform: translate(0, -50%);
+}
+
+.top-ruler .ruler-marker.is-end {
+  left: calc(100% - 10px) !important;
+  transform: translate(-100%, -50%);
+}
+
+.side-ruler .ruler-marker {
   left: 50%;
   transform: translate(-50%, -50%);
   writing-mode: vertical-rl;
+}
+
+.side-ruler .ruler-marker::after {
+  top: 50%;
+  right: -14px;
+  width: 10px;
+  height: 1px;
+  transform: translateY(-50%);
+}
+
+.side-ruler .ruler-marker.is-start {
+  top: 10px !important;
+  transform: translate(-50%, 0);
+}
+
+.side-ruler .ruler-marker.is-end {
+  top: calc(100% - 10px) !important;
+  transform: translate(-50%, -100%);
 }
 
 .sheet-stage {

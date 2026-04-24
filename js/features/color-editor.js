@@ -1,11 +1,13 @@
 import { bindDropzone } from "../utils/upload-zone.js";
-import { loadImageFromSource, getBaseName, revokeIfObjectUrl } from "../utils/files.js";
+import { loadImageFromSource, getBaseName } from "../utils/files.js";
 import { createElement, clearChildren, setFeedback } from "../utils/dom.js";
 import { detectDominantColors, applyPaletteReplacement, hexToRgb } from "../utils/colors.js";
 import { canvasToBlob, createCanvas } from "../utils/canvas.js";
 import { downloadBlob } from "../utils/download.js";
+import { setWorkspaceAsset, subscribeWorkspace } from "../utils/workspace.js";
 
-const MAX_WORKING_SIDE = 1800;
+const MAX_WORKING_SIDE = 2200;
+const EDITOR_PALETTE_SIZE = 8;
 
 export function initColorEditor() {
   const uploadInput = document.getElementById("editor-upload");
@@ -21,16 +23,25 @@ export function initColorEditor() {
   const downloadButton = document.getElementById("color-download-button");
   const status = document.getElementById("editor-status");
 
+  const editorSessionId =
+    globalThis.crypto?.randomUUID?.() || `editor-${Math.random().toString(36).slice(2)}`;
+
   const state = {
     fileName: "",
-    sourceUrl: "",
+    linkedBatchItemId: "",
     workingCanvas: null,
     originalImageData: null,
     editedCanvas: null,
     palette: [],
     replacements: [],
     tolerance: Number(toleranceRange.value),
-    activeIndex: 0
+    activeIndex: 0,
+    lastWorkspaceVersion: 0,
+    loadSequence: 0,
+    publishTimer: 0,
+    publishSequence: 0,
+    lastPublishedRevision: 0,
+    shouldPublishAfterRender: false
   };
 
   let renderFrame = 0;
@@ -38,13 +49,26 @@ export function initColorEditor() {
   bindDropzone({
     zone: dropzone,
     input: uploadInput,
-    onFiles: ([file]) => loadImage(file)
+    onFiles: ([file]) => {
+      setWorkspaceAsset({
+        blob: file,
+        fileName: getBaseName(file.name),
+        sourceTool: "editor",
+        linkedBatchItemId: "",
+        meta: {
+          origin: "upload",
+          editorSessionId
+        }
+      });
+    }
   });
+
+  subscribeWorkspace(handleWorkspaceAsset);
 
   toleranceRange.addEventListener("input", () => {
     state.tolerance = Number(toleranceRange.value);
     toleranceValue.textContent = toleranceRange.value;
-    scheduleResultRender();
+    scheduleResultRender(true);
   });
 
   colorPicker.addEventListener("input", () => {
@@ -54,7 +78,7 @@ export function initColorEditor() {
 
     state.replacements[state.activeIndex] = colorPicker.value.toUpperCase();
     renderPalette();
-    scheduleResultRender();
+    scheduleResultRender(true);
   });
 
   resetButton.addEventListener("click", () => {
@@ -64,7 +88,7 @@ export function initColorEditor() {
 
     state.replacements = state.palette.map((entry) => entry.hex);
     renderPalette();
-    scheduleResultRender();
+    scheduleResultRender(true);
     setFeedback(status, "A paleta original foi restaurada.", "success");
   });
 
@@ -73,6 +97,7 @@ export function initColorEditor() {
       return;
     }
 
+    await flushWorkspacePublish();
     const blob = await canvasToBlob(state.editedCanvas, "image/png");
     downloadBlob(blob, `${state.fileName || "arte"}-editada.png`);
   });
@@ -89,42 +114,67 @@ export function initColorEditor() {
     colorPicker.click();
   });
 
-  async function loadImage(file) {
-    try {
-      revokeIfObjectUrl(state.sourceUrl);
-
-      const image = await loadImageFromSource(file);
-      state.sourceUrl = image.dataset.temporaryUrl || image.src;
-      state.fileName = getBaseName(file.name);
-
-      // O editor usa uma cópia reduzida para manter a interação rápida em imagens maiores.
-      const width = image.naturalWidth;
-      const height = image.naturalHeight;
-      const scale = Math.min(1, MAX_WORKING_SIDE / Math.max(width, height));
-      const workingCanvas = createCanvas(width * scale, height * scale);
-      const workingContext = workingCanvas.getContext("2d", { willReadFrequently: true });
-      workingContext.drawImage(image, 0, 0, workingCanvas.width, workingCanvas.height);
-
-      state.workingCanvas = workingCanvas;
-      state.originalImageData = workingContext.getImageData(0, 0, workingCanvas.width, workingCanvas.height);
-      state.palette = detectDominantColors(workingCanvas, 6);
-      state.replacements = state.palette.map((entry) => entry.hex);
-      state.activeIndex = 0;
-      downloadButton.disabled = false;
-
-      renderOriginal();
-      renderPalette();
-      renderEdited();
-
-      paletteCaption.textContent = `${state.palette.length} cores detectadas`;
-      setFeedback(
-        status,
-        "Paleta detectada. Ao trocar uma cor, o editor agora tenta puxar as tonalidades relacionadas para manter luz e sombra.",
-        "success"
-      );
-    } catch (error) {
-      setFeedback(status, `Não foi possível carregar esta imagem: ${error.message}`, "error");
+  async function handleWorkspaceAsset(asset) {
+    if (!asset || asset.version === state.lastWorkspaceVersion) {
+      return;
     }
+
+    if (
+      asset.meta?.editorSessionId === editorSessionId &&
+      asset.meta?.editorRevision === state.lastPublishedRevision
+    ) {
+      state.lastWorkspaceVersion = asset.version;
+      return;
+    }
+
+    state.lastWorkspaceVersion = asset.version;
+
+    try {
+      const loadId = ++state.loadSequence;
+      await loadWorkspaceImage(asset, loadId);
+
+      const message =
+        asset.sourceTool === "batch"
+          ? "Imagem sincronizada do removedor de fundo. As cores detectadas ja consideram a nova arte."
+          : asset.sourceTool === "exporter"
+            ? "Imagem recebida da area de exportacao. Agora ela ja pode ser recolorida aqui."
+            : "Imagem carregada no editor. Ao trocar uma cor, o app tenta preservar luz, sombra e textura.";
+
+      setFeedback(status, message, "success");
+    } catch (error) {
+      setFeedback(status, `Nao foi possivel carregar esta imagem: ${error.message}`, "error");
+    }
+  }
+
+  async function loadWorkspaceImage(asset, loadId) {
+    const image = await loadImageFromSource(asset.url);
+    if (loadId !== state.loadSequence) {
+      return;
+    }
+
+    const width = image.naturalWidth;
+    const height = image.naturalHeight;
+    const scale = Math.min(1, MAX_WORKING_SIDE / Math.max(width, height));
+    const workingCanvas = createCanvas(width * scale, height * scale);
+    const workingContext = workingCanvas.getContext("2d", { willReadFrequently: true });
+    workingContext.drawImage(image, 0, 0, workingCanvas.width, workingCanvas.height);
+
+    state.fileName = asset.fileName || "arte";
+    state.linkedBatchItemId = asset.linkedBatchItemId || "";
+    state.workingCanvas = workingCanvas;
+    state.originalImageData = workingContext.getImageData(0, 0, workingCanvas.width, workingCanvas.height);
+    state.palette = detectDominantColors(workingCanvas, EDITOR_PALETTE_SIZE);
+    state.replacements = state.palette.map((entry) => entry.hex);
+    state.activeIndex = 0;
+    downloadButton.disabled = false;
+
+    renderOriginal();
+    renderPalette();
+    renderEdited();
+
+    paletteCaption.textContent = state.palette.length
+      ? `${state.palette.length} cores detectadas`
+      : "Nao foi possivel detectar a paleta";
   }
 
   function renderOriginal() {
@@ -169,7 +219,11 @@ export function initColorEditor() {
     });
   }
 
-  function scheduleResultRender() {
+  function scheduleResultRender(publishAfter = false) {
+    if (publishAfter) {
+      state.shouldPublishAfterRender = true;
+    }
+
     if (renderFrame) {
       return;
     }
@@ -177,6 +231,11 @@ export function initColorEditor() {
     renderFrame = requestAnimationFrame(() => {
       renderFrame = 0;
       renderEdited();
+
+      if (state.shouldPublishAfterRender) {
+        state.shouldPublishAfterRender = false;
+        queueWorkspacePublish();
+      }
     });
   }
 
@@ -185,7 +244,6 @@ export function initColorEditor() {
       return;
     }
 
-    // A troca de cor usa a distância da cor original e preserva parte da luminosidade do pixel.
     const mappings = state.palette.map((entry, index) => ({
       from: entry.rgb,
       to: hexToRgb(state.replacements[index] || entry.hex)
@@ -200,5 +258,57 @@ export function initColorEditor() {
     resultCanvas.getContext("2d").putImageData(edited, 0, 0);
 
     state.editedCanvas = editedCanvas;
+  }
+
+  function queueWorkspacePublish() {
+    if (!state.editedCanvas || !state.fileName) {
+      return;
+    }
+
+    window.clearTimeout(state.publishTimer);
+    state.publishTimer = window.setTimeout(() => {
+      publishEditedWorkspace().catch((error) => {
+        setFeedback(status, `Falha ao sincronizar a arte editada: ${error.message}`, "warning");
+      });
+    }, 140);
+  }
+
+  async function flushWorkspacePublish() {
+    if (!state.editedCanvas) {
+      return;
+    }
+
+    if (state.publishTimer) {
+      window.clearTimeout(state.publishTimer);
+      state.publishTimer = 0;
+      await publishEditedWorkspace();
+    }
+  }
+
+  async function publishEditedWorkspace() {
+    if (!state.editedCanvas) {
+      return;
+    }
+
+    state.publishTimer = 0;
+    const revision = ++state.publishSequence;
+    const blob = await canvasToBlob(state.editedCanvas, "image/png");
+
+    if (revision !== state.publishSequence) {
+      return;
+    }
+
+    state.lastPublishedRevision = revision;
+    setWorkspaceAsset({
+      blob,
+      fileName: state.fileName,
+      sourceTool: "editor",
+      linkedBatchItemId: state.linkedBatchItemId,
+      meta: {
+        origin: "editor-sync",
+        editorSessionId,
+        editorRevision: revision
+      }
+    });
   }
 }

@@ -17,7 +17,8 @@ const DEFAULT_CONFIG = {
 
 const FAST_MODE_TRIGGER_SIDE = 2200;
 const FAST_MODE_MAX_SIDE = 1800;
-const BORDER_ANALYSIS_SIDE = 900;
+const SOLID_BACKGROUND_ANALYSIS_SIDE = 1200;
+const SELECTED_BACKGROUND_ANALYSIS_SIDE = 1800;
 
 let backgroundRemovalModulePromise;
 let runtimePromise;
@@ -125,6 +126,54 @@ function colorDistance(rgb, reference) {
   return Math.hypot(rgb[0] - reference[0], rgb[1] - reference[1], rgb[2] - reference[2]);
 }
 
+function colorLuminance(rgb) {
+  return rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722;
+}
+
+function recoverForegroundFromBackground(rgb, backgroundColor, alpha) {
+  const ratio = clamp(alpha / 255, 0, 1);
+  if (ratio <= 0 || ratio >= 0.999) {
+    return rgb;
+  }
+
+  return rgb.map((value, index) => {
+    return clamp(Math.round((value - backgroundColor[index] * (1 - ratio)) / ratio), 0, 255);
+  });
+}
+
+function cleanupEdgeMatte(imageData, backgroundColor, haloThreshold = 40) {
+  const { data } = imageData;
+
+  for (let offset = 0; offset < data.length; offset += 4) {
+    const alpha = data[offset + 3];
+    if (!alpha) {
+      continue;
+    }
+
+    const recovered = recoverForegroundFromBackground(
+      [data[offset], data[offset + 1], data[offset + 2]],
+      backgroundColor,
+      alpha
+    );
+
+    data[offset] = recovered[0];
+    data[offset + 1] = recovered[1];
+    data[offset + 2] = recovered[2];
+
+    if (alpha >= 255) {
+      continue;
+    }
+
+    const matteDistance = colorDistance(recovered, backgroundColor);
+    if (matteDistance >= haloThreshold) {
+      continue;
+    }
+
+    const fade = clamp(matteDistance / haloThreshold, 0.08, 1);
+    data[offset + 3] = Math.round(alpha * fade);
+  }
+}
+
 function sampleBorderStats(imageData) {
   const { data, width, height } = imageData;
   const borderIndexes = [];
@@ -164,14 +213,20 @@ function sampleBorderStats(imageData) {
   const nearRatio =
     distances.filter((value) => value <= Math.max(18, meanDistance * 2.2)).length /
     distances.length;
+  const referenceLuma = colorLuminance(reference);
+  const isDarkBackground = referenceLuma <= 32;
 
-  if (meanDistance > 22 || nearRatio < 0.74) {
+  if (meanDistance > (isDarkBackground ? 28 : 22) || nearRatio < (isDarkBackground ? 0.68 : 0.74)) {
     return null;
   }
 
   return {
     backgroundColor: reference.map((value) => Math.round(value)),
-    tolerance: clamp(Math.round(meanDistance * 2.5 + 18), 18, 46)
+    tolerance: clamp(
+      Math.round(meanDistance * 2.5 + 18 + (isDarkBackground ? 10 : 0)),
+      18,
+      isDarkBackground ? 58 : 46
+    )
   };
 }
 
@@ -260,7 +315,7 @@ function buildBackgroundMask(imageData, stats, options = {}) {
   return maskImageData;
 }
 
-async function applyScaledMaskToSourceImage(sourceImage, maskImageData, onProgress) {
+async function applyScaledMaskToSourceImage(sourceImage, maskImageData, onProgress, options = {}) {
   onProgress?.({
     key: "mask:scale",
     current: 2,
@@ -292,6 +347,14 @@ async function applyScaledMaskToSourceImage(sourceImage, maskImageData, onProgre
     );
   }
 
+  if (options.backgroundColor) {
+    cleanupEdgeMatte(
+      resultImageData,
+      options.backgroundColor,
+      options.haloThreshold ?? clamp(options.tolerance + 10, 28, 58)
+    );
+  }
+
   resultContext.putImageData(resultImageData, 0, 0);
 
   onProgress?.({
@@ -310,7 +373,7 @@ async function trySolidBackgroundRemoval(source, onProgress) {
   try {
     const width = image.naturalWidth || image.width;
     const height = image.naturalHeight || image.height;
-    const analysisScale = Math.min(1, BORDER_ANALYSIS_SIDE / Math.max(width, height));
+    const analysisScale = Math.min(1, SOLID_BACKGROUND_ANALYSIS_SIDE / Math.max(width, height));
     const analysisCanvas = createCanvas(width * analysisScale, height * analysisScale);
     const analysisContext = analysisCanvas.getContext("2d", { willReadFrequently: true });
     analysisContext.drawImage(image, 0, 0, analysisCanvas.width, analysisCanvas.height);
@@ -339,7 +402,10 @@ async function trySolidBackgroundRemoval(source, onProgress) {
       return null;
     }
 
-    const blob = await applyScaledMaskToSourceImage(image, maskImageData, onProgress);
+    const blob = await applyScaledMaskToSourceImage(image, maskImageData, onProgress, {
+      backgroundColor: borderStats.backgroundColor,
+      tolerance: borderStats.tolerance
+    });
 
     return {
       blob,
@@ -384,11 +450,15 @@ function estimateSelectedTolerance(imageData, selectedRgb) {
 
   const closeMatches = distances.filter((value) => value <= 70);
   if (!closeMatches.length) {
-    return 42;
+    return colorLuminance(selectedRgb) < 32 ? 56 : 42;
   }
 
   const average = closeMatches.reduce((total, value) => total + value, 0) / closeMatches.length;
-  return clamp(Math.round(average * 2.3 + 18), 24, 58);
+  return clamp(
+    Math.round(average * 2.3 + 18 + (colorLuminance(selectedRgb) < 32 ? 10 : 0)),
+    24,
+    colorLuminance(selectedRgb) < 32 ? 68 : 58
+  );
 }
 
 async function removeSelectedBackgroundColor(source, selectedHex, onProgress) {
@@ -397,7 +467,7 @@ async function removeSelectedBackgroundColor(source, selectedHex, onProgress) {
   try {
     const width = image.naturalWidth || image.width;
     const height = image.naturalHeight || image.height;
-    const analysisScale = Math.min(1, BORDER_ANALYSIS_SIDE / Math.max(width, height));
+    const analysisScale = Math.min(1, SELECTED_BACKGROUND_ANALYSIS_SIDE / Math.max(width, height));
     const analysisCanvas = createCanvas(width * analysisScale, height * analysisScale);
     const analysisContext = analysisCanvas.getContext("2d", { willReadFrequently: true });
     analysisContext.drawImage(image, 0, 0, analysisCanvas.width, analysisCanvas.height);
@@ -430,7 +500,10 @@ async function removeSelectedBackgroundColor(source, selectedHex, onProgress) {
     );
 
     if (maskImageData) {
-      const blob = await applyScaledMaskToSourceImage(image, maskImageData, onProgress);
+      const blob = await applyScaledMaskToSourceImage(image, maskImageData, onProgress, {
+        backgroundColor: selectedRgb,
+        tolerance: selectedTolerance
+      });
       return {
         blob,
         meta: {
@@ -472,6 +545,12 @@ async function removeSelectedBackgroundColor(source, selectedHex, onProgress) {
         resultImageData.data[offset + 3] = Math.round(resultImageData.data[offset + 3] * factor);
       }
     }
+
+    cleanupEdgeMatte(
+      resultImageData,
+      selectedRgb,
+      clamp(selectedTolerance + 12, 30, 62)
+    );
 
     resultContext.putImageData(resultImageData, 0, 0);
 

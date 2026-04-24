@@ -7,6 +7,13 @@ import { createElement, clearChildren, setFeedback } from "../utils/dom.js";
 import { bindDropzone } from "../utils/upload-zone.js";
 import { downloadBlob, formatBytes } from "../utils/download.js";
 import { getBaseName, revokeIfObjectUrl, loadImageFromSource } from "../utils/files.js";
+import {
+  getWorkspaceAsset,
+  setWorkspaceAsset,
+  subscribeWorkspace
+} from "../utils/workspace.js";
+
+const BATCH_PALETTE_SIZE = 8;
 
 export function initBatchRemoval() {
   const uploadInput = document.getElementById("batch-upload");
@@ -20,7 +27,8 @@ export function initBatchRemoval() {
   const state = {
     items: [],
     processing: false,
-    counter: 0
+    counter: 0,
+    lastWorkspaceVersion: 0
   };
 
   let renderFrame = 0;
@@ -30,6 +38,8 @@ export function initBatchRemoval() {
     input: uploadInput,
     onFiles: addFiles
   });
+
+  subscribeWorkspace(handleWorkspaceAsset);
 
   runButton.addEventListener("click", runBatchRemoval);
   downloadButton.addEventListener("click", downloadAllPngs);
@@ -58,6 +68,15 @@ export function initBatchRemoval() {
       return;
     }
 
+    if (trigger.dataset.batchAction === "share") {
+      syncItemToWorkspace(item, {
+        useProcessed: Boolean(item.processedBlob),
+        silent: false
+      });
+      scheduleRender();
+      return;
+    }
+
     if (trigger.dataset.batchAction === "select-color") {
       const nextHex =
         item.selectedBackgroundHex === trigger.dataset.colorHex ? "" : trigger.dataset.colorHex;
@@ -74,13 +93,70 @@ export function initBatchRemoval() {
     }
   });
 
+  function handleWorkspaceAsset(asset) {
+    if (!asset || asset.version === state.lastWorkspaceVersion) {
+      return;
+    }
+
+    state.lastWorkspaceVersion = asset.version;
+
+    if (!asset.linkedBatchItemId || asset.sourceTool === "batch") {
+      scheduleRender();
+      return;
+    }
+
+    const item = state.items.find((entry) => entry.id === asset.linkedBatchItemId);
+    if (!item) {
+      scheduleRender();
+      return;
+    }
+
+    cleanupProcessedResult(item);
+    item.processedBlob = asset.blob;
+    item.processedUrl = URL.createObjectURL(asset.blob);
+    item.processedSummary =
+      asset.sourceTool === "editor"
+        ? "Atualizada pelo editor de cores e pronta para download."
+        : "Arte compartilhada atualizada e pronta para continuar o fluxo.";
+    item.status = "done";
+    item.progress = 100;
+    item.error = "";
+    scheduleRender();
+    syncButtons();
+  }
+
   function cleanupProcessedResult(item) {
     revokeIfObjectUrl(item.processedUrl);
     item.processedUrl = "";
     item.processedBlob = null;
   }
 
+  function syncItemToWorkspace(item, options = {}) {
+    const { useProcessed = true, silent = false } = options;
+    const sharedBlob = useProcessed && item.processedBlob ? item.processedBlob : item.file;
+
+    setWorkspaceAsset({
+      blob: sharedBlob,
+      fileName: getBaseName(item.file.name),
+      sourceTool: "batch",
+      linkedBatchItemId: item.id,
+      meta: {
+        origin: useProcessed && item.processedBlob ? "processed-item" : "original-item"
+      }
+    });
+
+    if (!silent) {
+      setFeedback(
+        status,
+        `${item.file.name} agora esta sincronizada com o editor de cores e com a exportacao.`,
+        "success"
+      );
+    }
+  }
+
   function addFiles(files) {
+    let lastAdded = null;
+
     files.forEach((file) => {
       const id = `batch-${state.counter++}`;
       const item = {
@@ -99,12 +175,17 @@ export function initBatchRemoval() {
       };
 
       state.items.push(item);
+      lastAdded = item;
       analyzePalette(item);
     });
 
+    if (lastAdded) {
+      syncItemToWorkspace(lastAdded, { useProcessed: false, silent: true });
+    }
+
     setFeedback(
       status,
-      `${state.items.length} arquivo(s) na fila. Se quiser, marque a cor de fundo de cada imagem antes de processar.`,
+      `${state.items.length} arquivo(s) na fila. A ultima imagem enviada ja pode seguir para o editor de cores e para a exportacao.`,
       "neutral"
     );
     render();
@@ -114,7 +195,7 @@ export function initBatchRemoval() {
   async function analyzePalette(item) {
     try {
       const image = await loadImageFromSource(item.originalUrl);
-      item.palette = detectDominantColors(image, 6);
+      item.palette = detectDominantColors(image, BATCH_PALETTE_SIZE);
     } catch (error) {
       item.palette = [];
     } finally {
@@ -215,8 +296,13 @@ export function initBatchRemoval() {
       return;
     }
 
+    const workspaceAsset = getWorkspaceAsset();
+
     state.items.forEach((item) => {
-      const card = createElement("article", { className: "preview-card" });
+      const isShared = workspaceAsset?.linkedBatchItemId === item.id;
+      const card = createElement("article", {
+        className: `preview-card ${isShared ? "is-shared" : ""}`.trim()
+      });
       const thumb = createElement("div", { className: "preview-card__thumb checkerboard" });
       const image = createElement("img", {
         attrs: {
@@ -262,6 +348,19 @@ export function initBatchRemoval() {
         downloadLink.removeAttribute("href");
       }
 
+      const shareButton = createElement("button", {
+        className: `inline-btn ${isShared ? "is-active" : ""}`.trim(),
+        text: isShared ? "Arte atual" : "Usar nas outras",
+        attrs: {
+          type: "button",
+          disabled: isShared ? "disabled" : undefined
+        },
+        dataset: {
+          batchAction: "share",
+          batchId: item.id
+        }
+      });
+
       const removeButton = createElement("button", {
         className: "inline-btn",
         text: "Remover",
@@ -277,14 +376,18 @@ export function initBatchRemoval() {
         text:
           item.error ||
           item.processedSummary ||
-          (item.processedBlob ? "Fundo transparente gerado." : "Pronto para processar.")
+          (item.processedBlob
+            ? "Fundo transparente gerado."
+            : isShared
+              ? "Imagem atual compartilhada com as outras ferramentas."
+              : "Pronto para processar.")
       });
       detail.style.color = item.error ? "var(--danger)" : "var(--muted)";
       detail.style.fontSize = "0.78rem";
 
       progress.append(progressFill);
       meta.append(size, pill);
-      actions.append(downloadLink, removeButton);
+      actions.append(downloadLink, shareButton, removeButton);
       thumb.append(image);
       body.append(title, meta, createPaletteSection(item), progress, detail, actions);
       card.append(thumb, body);
@@ -329,8 +432,8 @@ export function initBatchRemoval() {
       try {
         const result = await removeBackgroundLocally(
           item.file,
-          (progress) => {
-            item.progress = progress.percent || item.progress;
+          (progressInfo) => {
+            item.progress = progressInfo.percent || item.progress;
             scheduleRender();
           },
           {
@@ -339,12 +442,17 @@ export function initBatchRemoval() {
           }
         );
 
+        cleanupProcessedResult(item);
         item.processedBlob = result.blob;
         item.processedUrl = URL.createObjectURL(result.blob);
         item.processedSummary = result.meta.summary;
         item.status = "done";
         item.progress = 100;
         completed += 1;
+
+        if (queue.length === 1 || getWorkspaceAsset()?.linkedBatchItemId === item.id) {
+          syncItemToWorkspace(item, { silent: true });
+        }
 
         setFeedback(
           status,
@@ -372,7 +480,7 @@ export function initBatchRemoval() {
     if (readyCount) {
       setFeedback(
         status,
-        `${readyCount} imagem(ns) com fundo removido. Voce ja pode baixar os PNGs individualmente.`,
+        `${readyCount} imagem(ns) com fundo removido. O botao baixa cada PNG separadamente, um por um.`,
         "success"
       );
     }

@@ -109,7 +109,7 @@ export function hslToRgb(hsl) {
   ];
 }
 
-function collectSamples(imageSource, maxSide = 140, sampleStep = 2) {
+function collectSamples(imageSource, maxSide = 180, sampleStep = 2) {
   const canvas = document.createElement("canvas");
   const sourceWidth = imageSource.naturalWidth || imageSource.width;
   const sourceHeight = imageSource.naturalHeight || imageSource.height;
@@ -137,6 +137,32 @@ function collectSamples(imageSource, maxSide = 140, sampleStep = 2) {
   return samples;
 }
 
+function pickDiverseCentroids(samples, targetCount) {
+  const centroids = [[...samples[0]]];
+
+  while (centroids.length < targetCount) {
+    let bestSample = samples[centroids.length % samples.length];
+    let bestDistance = -1;
+    const step = Math.max(1, Math.floor(samples.length / 800));
+
+    for (let index = 0; index < samples.length; index += step) {
+      const sample = samples[index];
+      const nearestDistance = centroids.reduce((lowest, centroid) => {
+        return Math.min(lowest, colorDistance(sample, centroid));
+      }, Number.POSITIVE_INFINITY);
+
+      if (nearestDistance > bestDistance) {
+        bestDistance = nearestDistance;
+        bestSample = sample;
+      }
+    }
+
+    centroids.push([...bestSample]);
+  }
+
+  return centroids;
+}
+
 function averageCluster(points) {
   const total = points.reduce(
     (acc, point) => {
@@ -151,22 +177,18 @@ function averageCluster(points) {
   return total.map((value) => value / points.length);
 }
 
-export function detectDominantColors(imageSource, colorCount = 6) {
+export function detectDominantColors(imageSource, colorCount = 8) {
   const samples = collectSamples(imageSource);
   if (!samples.length) {
     return [];
   }
 
   const targetCount = Math.min(colorCount, samples.length);
-  const centroids = [];
-
-  for (let index = 0; index < targetCount; index += 1) {
-    const sampleIndex = Math.floor((samples.length / targetCount) * index);
-    centroids.push([...samples[sampleIndex]]);
-  }
+  const centroids = pickDiverseCentroids(samples, targetCount);
+  let clusters = Array.from({ length: targetCount }, () => []);
 
   for (let iteration = 0; iteration < 8; iteration += 1) {
-    const clusters = Array.from({ length: targetCount }, () => []);
+    clusters = Array.from({ length: targetCount }, () => []);
 
     samples.forEach((sample) => {
       let winner = 0;
@@ -190,11 +212,13 @@ export function detectDominantColors(imageSource, colorCount = 6) {
     });
   }
 
-  const scored = centroids.map((centroid) => {
-    const count = samples.filter((sample) => colorDistance(sample, centroid) < 38).length;
+  const scored = centroids.map((centroid, index) => {
+    const cluster = clusters[index] || [];
+    const average = cluster.length ? averageCluster(cluster) : centroid;
+
     return {
-      rgb: centroid.map((value) => clamp(Math.round(value), 0, 255)),
-      weight: count
+      rgb: average.map((value) => clamp(Math.round(value), 0, 255)),
+      weight: cluster.length
     };
   });
 
@@ -219,10 +243,10 @@ function isRelatedPaletteTone(candidate, owner) {
   }
 
   return (
-    hueDistance(candidate.fromHsl[0], owner.fromHsl[0]) <= 26 &&
-    Math.abs(candidate.fromHsl[1] - owner.fromHsl[1]) <= 0.28 &&
-    Math.abs(candidate.fromHsl[2] - owner.fromHsl[2]) <= 0.34 &&
-    colorDistance(candidate.from, owner.from) <= 150
+    hueDistance(candidate.fromHsl[0], owner.fromHsl[0]) <= 32 &&
+    Math.abs(candidate.fromHsl[1] - owner.fromHsl[1]) <= 0.34 &&
+    Math.abs(candidate.fromHsl[2] - owner.fromHsl[2]) <= 0.4 &&
+    colorDistance(candidate.from, owner.from) <= 170
   );
 }
 
@@ -265,11 +289,15 @@ function buildMembership(pixelRgb, pixelHsl, mapping, tolerance) {
       : hueDistance(pixelHsl[0], mapping.fromHsl[0]);
   const saturationDelta = Math.abs(pixelHsl[1] - mapping.fromHsl[1]);
   const lightnessDelta = Math.abs(pixelHsl[2] - mapping.fromHsl[2]);
+  const chromaDelta = Math.abs(
+    pixelHsl[1] * (0.35 + pixelHsl[2]) - mapping.fromHsl[1] * (0.35 + mapping.fromHsl[2])
+  );
 
-  const rgbThreshold = 24 + tolerance * 1.2;
-  const hueThreshold = 10 + tolerance * 0.52;
-  const saturationThreshold = 0.08 + tolerance / 420;
-  const lightnessThreshold = 0.16 + tolerance / 360;
+  const rgbThreshold = 22 + tolerance * 1.32;
+  const hueThreshold = 12 + tolerance * 0.58;
+  const saturationThreshold = 0.09 + tolerance / 360;
+  const lightnessThreshold = 0.18 + tolerance / 320;
+  const chromaThreshold = 0.11 + tolerance / 300;
 
   const acceptsHue =
     mapping.fromHsl[1] < 0.12 ||
@@ -278,6 +306,7 @@ function buildMembership(pixelRgb, pixelHsl, mapping, tolerance) {
   const acceptsColor =
     rgbDistance <= rgbThreshold &&
     lightnessDelta <= lightnessThreshold &&
+    chromaDelta <= chromaThreshold &&
     (acceptsHue || saturationDelta <= saturationThreshold * 0.9);
 
   if (!acceptsColor) {
@@ -288,9 +317,10 @@ function buildMembership(pixelRgb, pixelHsl, mapping, tolerance) {
     clamp(rgbDistance / rgbThreshold, 0, 1) * 0.34 +
     clamp(hueDelta / Math.max(hueThreshold, 1), 0, 1) * 0.31 +
     clamp(saturationDelta / saturationThreshold, 0, 1) * 0.15 +
-    clamp(lightnessDelta / lightnessThreshold, 0, 1) * 0.2;
+    clamp(lightnessDelta / lightnessThreshold, 0, 1) * 0.14 +
+    clamp(chromaDelta / chromaThreshold, 0, 1) * 0.06;
 
-  const influence = clamp(1 - score * 0.85, 0.28, 1);
+  const influence = clamp(1 - score * 0.78, 0.32, 1);
 
   return {
     score,

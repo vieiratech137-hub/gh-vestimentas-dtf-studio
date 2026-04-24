@@ -1,10 +1,11 @@
 import { jsPDF } from "https://cdn.jsdelivr.net/npm/jspdf@2.5.1/+esm";
 import { bindDropzone } from "../utils/upload-zone.js";
-import { loadImageFromSource, getBaseName, revokeIfObjectUrl } from "../utils/files.js";
+import { loadImageFromSource, getBaseName } from "../utils/files.js";
 import { createElement, clearChildren, clamp, formatNumber, setFeedback } from "../utils/dom.js";
 import { createCanvas, drawContainedImage, cmToPixels, canvasToBlob } from "../utils/canvas.js";
 import { downloadBlob } from "../utils/download.js";
 import { embedPngDpi } from "../utils/png-dpi.js";
+import { setWorkspaceAsset, subscribeWorkspace } from "../utils/workspace.js";
 
 export function initExporter() {
   const uploadInput = document.getElementById("export-upload");
@@ -26,14 +27,28 @@ export function initExporter() {
   const state = {
     image: null,
     fileName: "",
-    sourceUrl: ""
+    linkedBatchItemId: "",
+    lastWorkspaceVersion: 0,
+    loadSequence: 0
   };
 
   bindDropzone({
     zone: dropzone,
     input: uploadInput,
-    onFiles: ([file]) => loadImage(file)
+    onFiles: ([file]) => {
+      setWorkspaceAsset({
+        blob: file,
+        fileName: getBaseName(file.name),
+        sourceTool: "exporter",
+        linkedBatchItemId: "",
+        meta: {
+          origin: "upload"
+        }
+      });
+    }
   });
+
+  subscribeWorkspace(handleWorkspaceAsset);
 
   [formatField, widthField, heightField, dpiField, mirrorField].forEach((field) => {
     field.addEventListener("input", updatePreview);
@@ -45,29 +60,43 @@ export function initExporter() {
     heightField.value = "35";
     dpiField.value = "300";
     updatePreview();
-    setFeedback(
-      status,
-      "Área de exportação ajustada para 28 x 35 cm em 300 DPI.",
-      "success"
-    );
+    setFeedback(status, "Area de exportacao ajustada para 28 x 35 cm em 300 DPI.", "success");
   });
 
   downloadButton.addEventListener("click", exportCurrentFile);
 
   updatePreview();
 
-  async function loadImage(file) {
-    try {
-      revokeIfObjectUrl(state.sourceUrl);
+  async function handleWorkspaceAsset(asset) {
+    if (!asset || asset.version === state.lastWorkspaceVersion) {
+      return;
+    }
 
-      state.image = await loadImageFromSource(file);
-      state.sourceUrl = state.image.dataset.temporaryUrl || state.image.src;
-      state.fileName = getBaseName(file.name);
+    state.lastWorkspaceVersion = asset.version;
+
+    try {
+      const loadId = ++state.loadSequence;
+      const image = await loadImageFromSource(asset.url);
+      if (loadId !== state.loadSequence) {
+        return;
+      }
+
+      state.image = image;
+      state.fileName = asset.fileName || "arte";
+      state.linkedBatchItemId = asset.linkedBatchItemId || "";
       downloadButton.disabled = false;
       updatePreview();
-      setFeedback(status, "Preview atualizado. Você já pode exportar o arquivo final.", "success");
+
+      const message =
+        asset.sourceTool === "editor"
+          ? "Imagem recolorida recebida do editor. A exportacao agora usa essa versao atual."
+          : asset.sourceTool === "batch"
+            ? "Imagem sincronizada do removedor de fundo. O exportador ja esta usando esse resultado."
+            : "Preview atualizado. Voce ja pode exportar o arquivo final.";
+
+      setFeedback(status, message, "success");
     } catch (error) {
-      setFeedback(status, `Não foi possível carregar esta imagem: ${error.message}`, "error");
+      setFeedback(status, `Nao foi possivel carregar esta imagem: ${error.message}`, "error");
     }
   }
 
@@ -90,10 +119,24 @@ export function initExporter() {
     };
   }
 
+  function buildRulerValues(sizeCm) {
+    return [
+      { position: 0, value: 0 },
+      { position: 25, value: sizeCm / 4 },
+      { position: 50, value: sizeCm / 2 },
+      { position: 75, value: (sizeCm * 3) / 4 },
+      { position: 100, value: sizeCm }
+    ];
+  }
+
   function updateRuler(element, values, axis) {
     clearChildren(element);
+
     values.forEach((entry) => {
       const marker = createElement("span", {
+        className: `ruler-marker ${
+          entry.position === 0 ? "is-start" : entry.position === 100 ? "is-end" : "is-middle"
+        }`,
         text: `${formatNumber(entry.value, entry.value % 1 ? 1 : 0)} cm`
       });
       marker.style[axis] = `${entry.position}%`;
@@ -103,31 +146,13 @@ export function initExporter() {
 
   function updatePreview() {
     const settings = readSettings();
-    // O aspect-ratio mantém a folha proporcional mesmo quando o usuário troca as medidas.
     stage.style.aspectRatio = `${settings.widthCm} / ${settings.heightCm}`;
 
-    updateRuler(
-      topRuler,
-      [
-        { position: 0, value: 0 },
-        { position: 50, value: settings.widthCm / 2 },
-        { position: 100, value: settings.widthCm }
-      ],
-      "left"
-    );
-
-    updateRuler(
-      sideRuler,
-      [
-        { position: 0, value: 0 },
-        { position: 50, value: settings.heightCm / 2 },
-        { position: 100, value: settings.heightCm }
-      ],
-      "top"
-    );
+    updateRuler(topRuler, buildRulerValues(settings.widthCm), "left");
+    updateRuler(sideRuler, buildRulerValues(settings.heightCm), "top");
 
     summary.textContent =
-      `Área final: ${formatNumber(settings.widthCm, settings.widthCm % 1 ? 1 : 0)} x ` +
+      `Area final: ${formatNumber(settings.widthCm, settings.widthCm % 1 ? 1 : 0)} x ` +
       `${formatNumber(settings.heightCm, settings.heightCm % 1 ? 1 : 0)} cm • ` +
       `${settings.effectiveDpi} DPI • ${settings.widthPx} x ${settings.heightPx} px` +
       (settings.mirror ? " • espelhado" : "");
@@ -200,7 +225,6 @@ export function initExporter() {
       return;
     }
 
-    // A saída DTF sempre fixa 300 DPI, mesmo que o campo tenha sido alterado manualmente.
     const dpi = settings.format === "dtf" ? 300 : settings.effectiveDpi;
     let blob = await canvasToBlob(outputCanvas, "image/png");
     blob = await embedPngDpi(blob, dpi);
@@ -215,7 +239,7 @@ export function initExporter() {
     if (settings.format === "dtf" && settings.requestedDpi !== 300) {
       setFeedback(
         status,
-        "Arquivo DTF-ready exportado em 300 DPI, conforme o padrão dessa saída.",
+        "Arquivo DTF-ready exportado em 300 DPI, conforme o padrao dessa saida.",
         "success"
       );
       return;
