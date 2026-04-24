@@ -1,5 +1,8 @@
 import JSZip from "https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm";
-import { removeBackgroundLocally, ensureBackgroundRemovalModel } from "../utils/background-removal.js";
+import {
+  removeBackgroundLocally,
+  getBackgroundRemovalRuntime
+} from "../utils/background-removal.js";
 import { createElement, clearChildren, setFeedback } from "../utils/dom.js";
 import { bindDropzone } from "../utils/upload-zone.js";
 import { downloadBlob, formatBytes } from "../utils/download.js";
@@ -10,6 +13,7 @@ export function initBatchRemoval() {
   const dropzone = document.getElementById("batch-dropzone");
   const runButton = document.getElementById("batch-run-button");
   const downloadButton = document.getElementById("batch-download-button");
+  const fastModeCheckbox = document.getElementById("batch-fast-mode");
   const status = document.getElementById("batch-status");
   const grid = document.getElementById("batch-preview-grid");
 
@@ -63,6 +67,7 @@ export function initBatchRemoval() {
         originalUrl: URL.createObjectURL(file),
         processedUrl: "",
         processedBlob: null,
+        processedSummary: "",
         status: "pending",
         progress: 0,
         error: ""
@@ -166,7 +171,10 @@ export function initBatchRemoval() {
 
       const detail = createElement("div", {
         className: "mono",
-        text: item.error || (item.processedBlob ? "Fundo transparente gerado." : "Pronto para processar.")
+        text:
+          item.error ||
+          item.processedSummary ||
+          (item.processedBlob ? "Fundo transparente gerado." : "Pronto para processar.")
       });
       detail.style.color = item.error ? "var(--danger)" : "var(--muted)";
       detail.style.fontSize = "0.78rem";
@@ -188,46 +196,43 @@ export function initBatchRemoval() {
 
     state.processing = true;
     syncButtons();
-    setFeedback(status, "Preparando o modelo local de IA para remoção de fundo...");
 
-    try {
-      // O preload baixa e cacheia os arquivos do modelo para que o lote seguinte rode mais rápido.
-      await ensureBackgroundRemovalModel((progress) => {
-        setFeedback(
-          status,
-          `Baixando modelo local (${progress.percent}%): esse passo acontece só no primeiro uso.`,
-          "warning"
-        );
-      });
-    } catch (error) {
-      state.processing = false;
-      syncButtons();
-      setFeedback(
-        status,
-        `Não foi possível carregar o modelo local: ${error.message}`,
-        "error"
-      );
-      return;
-    }
+    const runtime = await getBackgroundRemovalRuntime();
+    const fastModeEnabled = fastModeCheckbox.checked;
+
+    setFeedback(
+      status,
+      fastModeEnabled
+        ? `Modo rápido ativo em ${runtime.label}. O primeiro arquivo ainda pode baixar o modelo local, mas sem o preload pesado de antes.`
+        : `Processamento em ${runtime.label} com resolução original. O primeiro arquivo ainda pode baixar o modelo local.`,
+      "warning"
+    );
 
     let completed = 0;
     const queue = state.items.filter((item) => !item.processedBlob);
 
-    // O processamento sequencial evita travamentos quando o usuário carrega muitas artes ao mesmo tempo.
     for (const item of queue) {
       item.status = "working";
-      item.progress = 12;
+      item.progress = 8;
       item.error = "";
+      item.processedSummary = "";
       scheduleRender();
 
       try {
-        const resultBlob = await removeBackgroundLocally(item.file, (progress) => {
-          item.progress = progress.percent || item.progress;
-          scheduleRender();
-        });
+        const result = await removeBackgroundLocally(
+          item.file,
+          (progress) => {
+            item.progress = progress.percent || item.progress;
+            scheduleRender();
+          },
+          {
+            fastMode: fastModeEnabled
+          }
+        );
 
-        item.processedBlob = resultBlob;
-        item.processedUrl = URL.createObjectURL(resultBlob);
+        item.processedBlob = result.blob;
+        item.processedUrl = URL.createObjectURL(result.blob);
+        item.processedSummary = result.meta.summary;
         item.status = "done";
         item.progress = 100;
         completed += 1;
@@ -243,7 +248,7 @@ export function initBatchRemoval() {
         item.error = error.message || "Falha ao remover o fundo desta imagem.";
         setFeedback(
           status,
-          `Algumas imagens falharam no processamento. Confira a fila para ver os detalhes.`,
+          "Algumas imagens falharam no processamento. Confira a fila para ver os detalhes.",
           "warning"
         );
       }
