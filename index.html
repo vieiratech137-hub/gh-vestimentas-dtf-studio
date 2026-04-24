@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DTF Studio | Ferramentas de estamparia no navegador</title>
+    <meta
+      name="description"
+      content="Remova fundos em lote, edite cores e exporte artes DTF direto no navegador."
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Sora:wght@400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./style.css" />
+    <script type="importmap">
+      {
+        "imports": {
+          "onnxruntime-web": "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/ort.bundle.min.mjs",
+          "onnxruntime-web/webgpu": "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/ort.webgpu.bundle.min.mjs"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div class="site-bg" aria-hidden="true"></div>
+
+    <div class="page-shell">
+      <header class="hero">
+        <div class="hero__eyebrow">GH Vestimentas • Estamparia DTF</div>
+        <h1>Ferramentas estáticas para preparar arte final sem sair do navegador.</h1>
+        <p class="hero__lead">
+          Remoção de fundo em lote, edição de cores e exportação pronta para impressão.
+          Tudo local, responsivo e pronto para publicar no GitHub Pages.
+        </p>
+
+        <div class="hero__actions">
+          <button class="launcher-card is-selected" type="button" data-open-panel="removal">
+            <span class="launcher-card__tag">Ferramenta 01</span>
+            <strong>Remover Fundo em Lote</strong>
+            <span>Faça upload de várias imagens, processe localmente e baixe um ZIP com PNGs transparentes.</span>
+          </button>
+
+          <button class="launcher-card" type="button" data-open-panel="editor">
+            <span class="launcher-card__tag">Ferramenta 02</span>
+            <strong>Editar Cores da Imagem</strong>
+            <span>Detecte a paleta principal, troque tons com seletor de cor e acompanhe o preview em tempo real.</span>
+          </button>
+
+          <button class="launcher-card" type="button" data-open-panel="exporter">
+            <span class="launcher-card__tag">Ferramenta 03</span>
+            <strong>Converter / Exportar</strong>
+            <span>Exporte PNG transparente, PDF com tamanho configurável ou arquivo DTF-ready espelhado em 300 DPI.</span>
+          </button>
+        </div>
+
+        <div class="hero__metrics">
+          <div class="metric-pill">
+            <strong>100% local</strong>
+            <span>Sem backend e sem envio de arquivos</span>
+          </div>
+          <div class="metric-pill">
+            <strong>Drag and drop</strong>
+            <span>Uploads rápidos para desktop e mobile</span>
+          </div>
+          <div class="metric-pill">
+            <strong>GitHub Pages</strong>
+            <span>Arquivos estáticos prontos para deploy</span>
+          </div>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <!-- Cada seção funciona como uma "página" interna para manter o projeto simples no GitHub Pages. -->
+        <section class="tool-panel is-active" id="removal" aria-labelledby="removal-title">
+          <div class="section-head">
+            <div>
+              <span class="section-head__eyebrow">Processamento em lote</span>
+              <h2 id="removal-title">Remover Fundo em Lote</h2>
+            </div>
+            <p>Ideal para preparar várias artes rapidamente sem depender de APIs externas.</p>
+          </div>
+
+          <div class="panel-grid panel-grid--wide">
+            <article class="panel-card">
+              <div class="card-head">
+                <h3>Upload e processamento</h3>
+                <p>Adicione PNG, JPG ou WEBP. No primeiro uso, o navegador baixa o modelo local de IA.</p>
+              </div>
+
+              <div class="dropzone" id="batch-dropzone" tabindex="0">
+                <input id="batch-upload" type="file" accept="image/*" multiple hidden />
+                <div class="dropzone__copy">
+                  <span class="dropzone__icon">+</span>
+                  <strong>Arraste várias imagens aqui</strong>
+                  <span>ou use o botão para selecionar do computador</span>
+                </div>
+                <button class="secondary-btn" type="button" data-trigger-upload="batch-upload">
+                  Selecionar imagens
+                </button>
+              </div>
+
+              <div class="action-row">
+                <button class="primary-btn" id="batch-run-button" type="button">
+                  Remover fundo em lote
+                </button>
+                <button class="secondary-btn" id="batch-download-button" type="button" disabled>
+                  Baixar ZIP transparente
+                </button>
+              </div>
+
+              <div class="feedback" id="batch-status" data-tone="neutral">
+                Adicione as imagens para montar a fila de processamento.
+              </div>
+            </article>
+
+            <article class="panel-card">
+              <div class="card-head">
+                <h3>Fila de imagens</h3>
+                <p>As imagens são processadas uma a uma para manter o navegador estável.</p>
+              </div>
+
+              <div class="preview-grid" id="batch-preview-grid">
+                <div class="empty-state">
+                  <strong>Nenhuma imagem carregada</strong>
+                  <span>O preview aparece aqui assim que o upload for feito.</span>
+                </div>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section class="tool-panel" id="editor" aria-labelledby="editor-title" hidden>
+          <div class="section-head">
+            <div>
+              <span class="section-head__eyebrow">Paleta e recoloração</span>
+              <h2 id="editor-title">Editor de Cores da Imagem</h2>
+            </div>
+            <p>Troque cores detectadas automaticamente e veja a prévia atualizada ao vivo.</p>
+          </div>
+
+          <div class="panel-grid">
+            <article class="panel-card">
+              <div class="card-head">
+                <h3>Imagem e paleta</h3>
+                <p>O algoritmo lê a imagem em canvas, encontra os tons dominantes e monta uma paleta editável.</p>
+              </div>
+
+              <div class="dropzone" id="editor-dropzone" tabindex="0">
+                <input id="editor-upload" type="file" accept="image/*" hidden />
+                <div class="dropzone__copy">
+                  <span class="dropzone__icon">🎨</span>
+                  <strong>Envie uma imagem para editar</strong>
+                  <span>Arraste e solte ou escolha um arquivo</span>
+                </div>
+                <button class="secondary-btn" type="button" data-trigger-upload="editor-upload">
+                  Selecionar imagem
+                </button>
+              </div>
+
+              <div class="palette-wrap">
+                <div class="subhead">
+                  <strong>Paleta detectada</strong>
+                  <span id="palette-caption">Aguardando imagem</span>
+                </div>
+                <div class="swatch-grid" id="color-palette">
+                  <div class="empty-state empty-state--compact">
+                    <span>As cores principais aparecem aqui.</span>
+                  </div>
+                </div>
+                <input id="color-picker" type="color" hidden />
+              </div>
+
+              <div class="range-field">
+                <label for="color-tolerance">
+                  Tolerância da substituição
+                  <span class="mono" id="color-tolerance-value">56</span>
+                </label>
+                <input id="color-tolerance" type="range" min="16" max="160" step="2" value="56" />
+              </div>
+
+              <div class="action-row">
+                <button class="secondary-btn" id="color-reset-button" type="button">
+                  Restaurar paleta
+                </button>
+                <button class="primary-btn" id="color-download-button" type="button" disabled>
+                  Baixar PNG editado
+                </button>
+              </div>
+
+              <div class="feedback" id="editor-status" data-tone="neutral">
+                Envie uma imagem para detectar as cores principais.
+              </div>
+            </article>
+
+            <article class="panel-card">
+              <div class="card-head">
+                <h3>Preview comparativo</h3>
+                <p>O painel original fica à esquerda e o resultado editado aparece à direita.</p>
+              </div>
+
+              <div class="compare-grid">
+                <div class="canvas-panel">
+                  <div class="subhead">
+                    <strong>Original</strong>
+                  </div>
+                  <div class="canvas-frame checkerboard">
+                    <canvas id="editor-original-canvas"></canvas>
+                  </div>
+                </div>
+
+                <div class="canvas-panel">
+                  <div class="subhead">
+                    <strong>Editado</strong>
+                  </div>
+                  <div class="canvas-frame checkerboard">
+                    <canvas id="editor-result-canvas"></canvas>
+                  </div>
+                </div>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section class="tool-panel" id="exporter" aria-labelledby="exporter-title" hidden>
+          <div class="section-head">
+            <div>
+              <span class="section-head__eyebrow">Saída final</span>
+              <h2 id="exporter-title">Converter / Exportar</h2>
+            </div>
+            <p>Monte a área de impressão, escolha formato de saída e exporte com medidas exatas.</p>
+          </div>
+
+          <div class="panel-grid">
+            <article class="panel-card">
+              <div class="card-head">
+                <h3>Configuração da exportação</h3>
+                <p>Defina dimensões em centímetros, resolução em DPI e se deseja espelhar o arquivo.</p>
+              </div>
+
+              <div class="dropzone" id="export-dropzone" tabindex="0">
+                <input id="export-upload" type="file" accept="image/*" hidden />
+                <div class="dropzone__copy">
+                  <span class="dropzone__icon">⇅</span>
+                  <strong>Envie uma imagem para converter</strong>
+                  <span>O preview respeita o tamanho final informado</span>
+                </div>
+                <button class="secondary-btn" type="button" data-trigger-upload="export-upload">
+                  Selecionar imagem
+                </button>
+              </div>
+
+              <div class="field-grid">
+                <label class="field">
+                  Formato de saída
+                  <select id="export-format">
+                    <option value="png">PNG transparente</option>
+                    <option value="pdf">PDF</option>
+                    <option value="dtf">DTF-ready (PNG 300 DPI)</option>
+                  </select>
+                </label>
+
+                <label class="field">
+                  Largura (cm)
+                  <input id="export-width" type="number" min="1" step="0.1" value="28" />
+                </label>
+
+                <label class="field">
+                  Altura (cm)
+                  <input id="export-height" type="number" min="1" step="0.1" value="35" />
+                </label>
+
+                <label class="field">
+                  Resolução (DPI)
+                  <input id="export-dpi" type="number" min="72" step="1" value="300" />
+                </label>
+              </div>
+
+              <label class="checkbox-field">
+                <input id="export-mirror" type="checkbox" />
+                <span>Espelhar horizontalmente</span>
+              </label>
+
+              <div class="action-row">
+                <button class="secondary-btn" id="export-autofit-button" type="button">
+                  Ajustar para 28x35 automaticamente
+                </button>
+                <button class="primary-btn" id="export-download-button" type="button" disabled>
+                  Baixar arquivo
+                </button>
+              </div>
+
+              <div class="feedback" id="export-status" data-tone="neutral">
+                Envie uma imagem para gerar o preview de exportação.
+              </div>
+            </article>
+
+            <article class="panel-card">
+              <div class="card-head">
+                <h3>Preview com régua</h3>
+                <p>A régua ajuda a visualizar a proporção da área de impressão antes do download.</p>
+              </div>
+
+              <div class="sheet-preview">
+                <div class="top-ruler" id="export-top-ruler" aria-hidden="true"></div>
+                <div class="side-ruler" id="export-side-ruler" aria-hidden="true"></div>
+                <div class="sheet-stage checkerboard" id="export-stage">
+                  <canvas id="export-preview-canvas"></canvas>
+                </div>
+              </div>
+
+              <div class="sheet-meta" id="export-summary">
+                Área final: 28 x 35 cm • 300 DPI • 3307 x 4134 px
+              </div>
+            </article>
+          </div>
+        </section>
+      </main>
+
+      <footer class="page-footer">
+        <p>
+          Projeto estático pronto para GitHub Pages. O processamento é local e a remoção de fundo usa
+          um modelo baixado no primeiro uso e armazenado em cache do navegador.
+        </p>
+      </footer>
+    </div>
+
+    <script type="module" src="./script.js"></script>
+  </body>
+</html>
