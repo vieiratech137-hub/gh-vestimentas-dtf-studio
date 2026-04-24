@@ -27,8 +27,86 @@ export function colorDistance(a, b) {
   return Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
 }
 
-function luminance([r, g, b]) {
-  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+export function hueDistance(a, b) {
+  const diff = Math.abs(a - b) % 360;
+  return diff > 180 ? 360 - diff : diff;
+}
+
+export function rgbToHsl(rgb) {
+  const [rByte, gByte, bByte] = rgb;
+  const r = rByte / 255;
+  const g = gByte / 255;
+  const b = bByte / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const lightness = (max + min) / 2;
+  const delta = max - min;
+  let hue = 0;
+  let saturation = 0;
+
+  if (delta !== 0) {
+    saturation =
+      lightness > 0.5 ? delta / (2 - max - min) : delta / (max + min);
+
+    switch (max) {
+      case r:
+        hue = ((g - b) / delta + (g < b ? 6 : 0)) * 60;
+        break;
+      case g:
+        hue = ((b - r) / delta + 2) * 60;
+        break;
+      default:
+        hue = ((r - g) / delta + 4) * 60;
+        break;
+    }
+  }
+
+  return [hue, saturation, lightness];
+}
+
+function hueToRgb(p, q, t) {
+  let wrapped = t;
+
+  if (wrapped < 0) {
+    wrapped += 1;
+  }
+  if (wrapped > 1) {
+    wrapped -= 1;
+  }
+
+  if (wrapped < 1 / 6) {
+    return p + (q - p) * 6 * wrapped;
+  }
+  if (wrapped < 1 / 2) {
+    return q;
+  }
+  if (wrapped < 2 / 3) {
+    return p + (q - p) * (2 / 3 - wrapped) * 6;
+  }
+
+  return p;
+}
+
+export function hslToRgb(hsl) {
+  const [hue, saturation, lightness] = hsl;
+  const hueUnit = ((hue % 360) + 360) % 360 / 360;
+
+  if (saturation === 0) {
+    const gray = Math.round(lightness * 255);
+    return [gray, gray, gray];
+  }
+
+  const q =
+    lightness < 0.5
+      ? lightness * (1 + saturation)
+      : lightness + saturation - lightness * saturation;
+  const p = 2 * lightness - q;
+
+  return [
+    Math.round(hueToRgb(p, q, hueUnit + 1 / 3) * 255),
+    Math.round(hueToRgb(p, q, hueUnit) * 255),
+    Math.round(hueToRgb(p, q, hueUnit - 1 / 3) * 255)
+  ];
 }
 
 function collectSamples(imageSource, maxSide = 140, sampleStep = 2) {
@@ -52,8 +130,7 @@ function collectSamples(imageSource, maxSide = 140, sampleStep = 2) {
         continue;
       }
 
-      const point = [data[index], data[index + 1], data[index + 2]];
-      samples.push(point);
+      samples.push([data[index], data[index + 1], data[index + 2]]);
     }
   }
 
@@ -109,8 +186,6 @@ export function detectDominantColors(imageSource, colorCount = 6) {
     centroids.forEach((centroid, centroidIndex) => {
       if (clusters[centroidIndex].length) {
         centroids[centroidIndex] = averageCluster(clusters[centroidIndex]);
-      } else {
-        centroids[centroidIndex] = centroid;
       }
     });
   }
@@ -133,14 +208,125 @@ export function detectDominantColors(imageSource, colorCount = 6) {
   return deduped.map((entry) => ({
     rgb: entry.rgb,
     hex: rgbToHex(entry.rgb),
+    hsl: rgbToHsl(entry.rgb),
     weight: entry.weight
   }));
+}
+
+function isRelatedPaletteTone(candidate, owner) {
+  if (owner.fromHsl[1] < 0.1 || candidate.fromHsl[1] < 0.08) {
+    return false;
+  }
+
+  return (
+    hueDistance(candidate.fromHsl[0], owner.fromHsl[0]) <= 26 &&
+    Math.abs(candidate.fromHsl[1] - owner.fromHsl[1]) <= 0.28 &&
+    Math.abs(candidate.fromHsl[2] - owner.fromHsl[2]) <= 0.34 &&
+    colorDistance(candidate.from, owner.from) <= 150
+  );
+}
+
+function expandMappingsToRelatedFamilies(mappings) {
+  const prepared = mappings.map((mapping, index) => ({
+    ...mapping,
+    index,
+    fromHsl: rgbToHsl(mapping.from),
+    toHsl: rgbToHsl(mapping.to),
+    changed: colorDistance(mapping.from, mapping.to) > 6
+  }));
+
+  const editedRoots = prepared.filter((mapping) => mapping.changed);
+
+  return prepared.map((mapping) => {
+    if (mapping.changed || !editedRoots.length) {
+      return mapping;
+    }
+
+    const familyRoot = editedRoots.find((owner) => isRelatedPaletteTone(mapping, owner));
+    if (!familyRoot) {
+      return mapping;
+    }
+
+    return {
+      ...mapping,
+      to: familyRoot.to,
+      toHsl: familyRoot.toHsl,
+      familyRootIndex: familyRoot.index,
+      changed: true
+    };
+  });
+}
+
+function buildMembership(pixelRgb, pixelHsl, mapping, tolerance) {
+  const rgbDistance = colorDistance(pixelRgb, mapping.from);
+  const hueDelta =
+    pixelHsl[1] < 0.05 || mapping.fromHsl[1] < 0.06
+      ? 180
+      : hueDistance(pixelHsl[0], mapping.fromHsl[0]);
+  const saturationDelta = Math.abs(pixelHsl[1] - mapping.fromHsl[1]);
+  const lightnessDelta = Math.abs(pixelHsl[2] - mapping.fromHsl[2]);
+
+  const rgbThreshold = 24 + tolerance * 1.2;
+  const hueThreshold = 10 + tolerance * 0.52;
+  const saturationThreshold = 0.08 + tolerance / 420;
+  const lightnessThreshold = 0.16 + tolerance / 360;
+
+  const acceptsHue =
+    mapping.fromHsl[1] < 0.12 ||
+    pixelHsl[1] < 0.05 ||
+    hueDelta <= hueThreshold;
+  const acceptsColor =
+    rgbDistance <= rgbThreshold &&
+    lightnessDelta <= lightnessThreshold &&
+    (acceptsHue || saturationDelta <= saturationThreshold * 0.9);
+
+  if (!acceptsColor) {
+    return null;
+  }
+
+  const score =
+    clamp(rgbDistance / rgbThreshold, 0, 1) * 0.34 +
+    clamp(hueDelta / Math.max(hueThreshold, 1), 0, 1) * 0.31 +
+    clamp(saturationDelta / saturationThreshold, 0, 1) * 0.15 +
+    clamp(lightnessDelta / lightnessThreshold, 0, 1) * 0.2;
+
+  const influence = clamp(1 - score * 0.85, 0.28, 1);
+
+  return {
+    score,
+    influence
+  };
+}
+
+function recolorPixel(pixelRgb, pixelHsl, mapping, influence) {
+  const sourceHsl = mapping.fromHsl;
+  const targetHsl = mapping.toHsl;
+  const sourceSaturation = Math.max(sourceHsl[1], 0.08);
+  const saturationScale = targetHsl[1] / sourceSaturation;
+  const relativeLightness = pixelHsl[2] - sourceHsl[2];
+
+  let nextSaturation = pixelHsl[1] * saturationScale;
+  nextSaturation = nextSaturation * 0.62 + targetHsl[1] * 0.38;
+  nextSaturation = clamp(nextSaturation, 0, 1);
+
+  let nextLightness = targetHsl[2] + relativeLightness * 0.92;
+  nextLightness = nextLightness * 0.68 + pixelHsl[2] * 0.32;
+  nextLightness = clamp(nextLightness, 0, 1);
+
+  const recolored = hslToRgb([targetHsl[0], nextSaturation, nextLightness]);
+
+  return [
+    Math.round(pixelRgb[0] + (recolored[0] - pixelRgb[0]) * influence),
+    Math.round(pixelRgb[1] + (recolored[1] - pixelRgb[1]) * influence),
+    Math.round(pixelRgb[2] + (recolored[2] - pixelRgb[2]) * influence)
+  ];
 }
 
 export function applyPaletteReplacement(imageData, mappings, tolerance) {
   const source = imageData.data;
   const result = new Uint8ClampedArray(source);
-  const activeMappings = mappings.filter(({ from, to }) => colorDistance(from, to) > 1);
+  const expandedMappings = expandMappingsToRelatedFamilies(mappings);
+  const activeMappings = expandedMappings.filter(({ changed }) => changed);
 
   if (!activeMappings.length) {
     return new ImageData(result, imageData.width, imageData.height);
@@ -152,29 +338,38 @@ export function applyPaletteReplacement(imageData, mappings, tolerance) {
       continue;
     }
 
-    const pixel = [result[index], result[index + 1], result[index + 2]];
+    const pixelRgb = [result[index], result[index + 1], result[index + 2]];
+    const pixelHsl = rgbToHsl(pixelRgb);
     let winner = null;
-    let bestDistance = Number.POSITIVE_INFINITY;
 
     activeMappings.forEach((mapping) => {
-      const distance = colorDistance(pixel, mapping.from);
-      if (distance < bestDistance) {
-        bestDistance = distance;
-        winner = mapping;
+      const membership = buildMembership(pixelRgb, pixelHsl, mapping, tolerance);
+      if (!membership) {
+        return;
+      }
+
+      if (!winner || membership.score < winner.membership.score) {
+        winner = {
+          mapping,
+          membership
+        };
       }
     });
 
-    if (!winner || bestDistance > tolerance) {
+    if (!winner) {
       continue;
     }
 
-    const fromLum = Math.max(luminance(winner.from), 1);
-    const pixelLum = luminance(pixel);
-    const brightnessScale = clamp(pixelLum / fromLum, 0.35, 1.85);
+    const recolored = recolorPixel(
+      pixelRgb,
+      pixelHsl,
+      winner.mapping,
+      winner.membership.influence
+    );
 
-    result[index] = clamp(Math.round(winner.to[0] * brightnessScale), 0, 255);
-    result[index + 1] = clamp(Math.round(winner.to[1] * brightnessScale), 0, 255);
-    result[index + 2] = clamp(Math.round(winner.to[2] * brightnessScale), 0, 255);
+    result[index] = recolored[0];
+    result[index + 1] = recolored[1];
+    result[index + 2] = recolored[2];
   }
 
   return new ImageData(result, imageData.width, imageData.height);

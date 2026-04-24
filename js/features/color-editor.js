@@ -119,7 +119,7 @@ export function initColorEditor() {
       paletteCaption.textContent = `${state.palette.length} cores detectadas`;
       setFeedback(
         status,
-        "Paleta detectada. Clique em uma cor para abrir o seletor e substituir o tom.",
+        "Paleta detectada. Ao trocar uma cor, o editor agora tenta puxar as tonalidades relacionadas para manter luz e sombra.",
         "success"
       );
     } catch (error) {
